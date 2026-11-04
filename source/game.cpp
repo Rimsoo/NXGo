@@ -400,7 +400,7 @@ bool Game::saveSgf(const std::string& path) const
     char date[16];
     time_t now = time(NULL);
     strftime(date, sizeof(date), "%Y-%m-%d", localtime(&now));
-    out << "(;GM[1]FF[4]CA[UTF-8]AP[NXGo:0.1]SZ[" << n << "]KM[" << m_setup.komi << "]";
+    out << "(;GM[1]FF[4]CA[UTF-8]AP[NXGo:0.2]SZ[" << n << "]KM[" << m_setup.komi << "]";
     out << "RU[" << (m_setup.rules == RulesKind::Chinese ? "Chinese" : "Japanese") << "]DT[" << date << "]";
     if (!m_setup.blackName.empty())
         out << "PB[" << sgfEscape(m_setup.blackName) << "]";
