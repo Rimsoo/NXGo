@@ -1,0 +1,18 @@
+# Build
+build/
+*.elf
+*.nacp
+*.nro
+*.nso
+*.nsp
+*.npdm
+*.map
+
+# KataGo networks (downloaded by tools/get_models.sh)
+models/
+romfs/models/
+kgbench/romfs/models/
+
+# Local test output
+*.log
+__pycache__/
