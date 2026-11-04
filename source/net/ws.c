@@ -149,14 +149,19 @@ bool ws_recv(WsConn *ws, u8 **out, size_t *out_len)
             for (u64 i = 0; i < len; i++)
                 payload[i] ^= mask[i & 3];
 
-        if (opcode == OP_PING) {
-            send_frame(ws, OP_PONG, payload, len);
+        // Trame de contrôle : on rend la main (message vide) plutôt que d'attendre
+        // le prochain message, qui peut tarder ; l'appelant reste libre d'envoyer.
+        if (opcode == OP_PING || opcode == OP_PONG) {
+            if (opcode == OP_PING)
+                send_frame(ws, OP_PONG, payload, len);
             free(payload);
-            continue;
-        }
-        if (opcode == OP_PONG) {
-            free(payload);
-            continue;
+            if (msg_len == 0) {
+                free(msg);
+                *out = NULL;
+                *out_len = 0;
+                return true;
+            }
+            continue;  // au milieu d'un message fragmenté : on le finit
         }
         if (opcode == OP_CLOSE) {
             log_printf("WebSocket fermé par le serveur\n");

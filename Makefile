@@ -40,7 +40,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET		:=	nxgo
 APP_TITLE	:=	NXGo
 APP_AUTHOR	:=	Rimso
-APP_VERSION	:=	0.2.0
+APP_VERSION	:=	0.2.1
 BUILD		:=	build
 SOURCES		:=	source source/net
 DATA		:=	data

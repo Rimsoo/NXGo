@@ -13,6 +13,8 @@ typedef struct {
     int tcp_fd;              // notre socket TCP, gardée ouverte pendant la connexion
     int ssl_fd;              // copie rendue par le module SSL (à fermer aussi), -1 sinon
     bool open;
+    bool dead;               // erreur de lecture constatée (connexion perdue)
+    int timeout_ms;          // délai max d'une lecture/écriture complète
     u8 buf[16384];           // tampon de lecture
     u32 buf_pos, buf_len;
 } TlsConn;

@@ -20,7 +20,8 @@ bool ws_send_text(WsConn *ws, const char *text);
 bool ws_readable(WsConn *ws, int timeout_ms);
 
 // Reçoit le prochain message complet (réassemble les fragments, répond aux pings).
-// *out est alloué avec malloc et doit être libéré par l'appelant.
+// *out est alloué avec malloc et doit être libéré par l'appelant ; il vaut NULL
+// (longueur 0) quand seule une trame de contrôle (ping/pong) est arrivée.
 bool ws_recv(WsConn *ws, u8 **out, size_t *out_len);
 
 #ifdef __cplusplus

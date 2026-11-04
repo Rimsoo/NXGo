@@ -3,8 +3,11 @@
 // Client online-go.com (OGS) : connexion au compte, liste des parties, recherche
 // d'adversaire et échanges en temps réel (websocket) pendant une partie.
 //
-// Tout le réseau tourne sur un fil dédié ; l'interface appelle les méthodes publiques
-// (rapides, sans attente) et lit les événements reçus avec pollEvent().
+// Deux fils réseau : l'un pour les requêtes HTTP (connexion, listes, SGF), l'autre pour
+// le websocket ; un websocket bloqué (Wi-Fi coupé, mise en veille) ne retarde donc
+// jamais le reste, et un chien de garde le coupe s'il ne répond plus aux pings.
+// L'interface appelle les méthodes publiques (rapides, sans attente) et lit les
+// événements reçus avec pollEvent().
 //
 // Connexion : identifiant + mot de passe tapés sur la Switch, échangés contre un jeton
 // OAuth2 d'OGS (grant "password"). Le mot de passe n'est jamais enregistré : seuls les
@@ -96,7 +99,8 @@ public:
     int64_t serverNowMs() const;
 
 private:
-    void run();
+    void run();       // fil HTTP : tâches + chien de garde du websocket
+    void runSocket();  // fil websocket
     void post(std::function<void()> task);
     void send(const std::string& cmd, const nlohmann::json& data);
     void setError(const std::string& msg);
@@ -115,7 +119,7 @@ private:
     void closeSocket();
     void handleMessage(const char* text, size_t len);
 
-    std::thread m_thread;
+    std::thread m_thread, m_wsThread;
     std::atomic<bool> m_quit{false};
     std::atomic<OgsState> m_state{OgsState::LoggedOut};
     std::atomic<bool> m_wsOpen{false};
@@ -134,10 +138,16 @@ private:
     std::string m_error, m_username;
     std::string m_automatchUuid;
 
-    // Fil réseau uniquement
-    std::string m_clientId, m_access, m_refresh, m_jwt;
+    // Fil HTTP uniquement
+    std::string m_clientId, m_access, m_refresh;
     int64_t m_expires = 0;
-    bool m_wantSocket = false;
+    std::string m_jwt;  // écrit par le fil HTTP, lu par le fil websocket (sous m_mutex)
+
+    // Fil websocket
+    std::atomic<bool> m_wantSocket{false};
+    std::atomic<bool> m_reconnectNow{false};
+    std::atomic<int> m_wsFd{-1};             // socket TCP du websocket (pour le couper)
+    std::atomic<uint64_t> m_lastRecvMs{0};   // dernier message reçu (le serveur répond aux pings)
     uint64_t m_nextConnectMs = 0, m_lastPingMs = 0;
     int m_reconnectDelay = 1;
     void* m_ws = nullptr;  // WsConn

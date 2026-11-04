@@ -1,5 +1,6 @@
 #include "ogs.h"
 
+#include <sys/socket.h>
 #include <sys/stat.h>
 
 #include <chrono>
@@ -112,6 +113,7 @@ void Ogs::start()
     tls_init();
     m_quit = false;
     m_thread = std::thread([this] { run(); });
+    m_wsThread = std::thread([this] { runSocket(); });
     post([this] {
         if (loadAuth())
             openSession();
@@ -123,7 +125,11 @@ void Ogs::stop()
     if (!m_thread.joinable())
         return;
     m_quit = true;
+    int fd = m_wsFd;
+    if (fd >= 0)
+        shutdown(fd, SHUT_RDWR);  // débloque une lecture en cours
     m_thread.join();
+    m_wsThread.join();
     tls_exit();
     net_exit();
 }
@@ -200,8 +206,30 @@ void Ogs::run()
             task();
             continue;
         }
+        // Chien de garde : sans réponse aux pings depuis 35 s, la connexion est morte
+        // (veille, Wi-Fi) ; couper la socket débloque le fil websocket, qui se reconnecte.
+        int fd = m_wsFd;
+        if (m_wsOpen && fd >= 0 && monoMs() - m_lastRecvMs > 35000) {
+            log_printf("OGS : websocket muet depuis 35 s, coupure\n");
+            m_lastRecvMs = monoMs();
+            shutdown(fd, SHUT_RDWR);
+        }
+        svcSleepThread(20000000ULL);
+    }
+}
 
+void Ogs::runSocket()
+{
+    while (!m_quit) {
         uint64_t now = monoMs();
+        if (m_wsOpen && !m_wantSocket) {
+            closeSocket();  // déconnexion du compte
+            continue;
+        }
+        if (m_reconnectNow.exchange(false)) {
+            m_nextConnectMs = 0;
+            m_reconnectDelay = 1;
+        }
         if (m_wantSocket && !m_wsOpen && now >= m_nextConnectMs)
             connectSocket();
 
@@ -224,20 +252,20 @@ void Ogs::run()
         for (const std::string& msg : out)
             ok = ok && ws_send_text(ws, msg.c_str());
 
-        while (ok && ws_readable(ws, 30)) {
+        while (ok && !m_quit && ws_readable(ws, 30)) {
             u8* data = nullptr;
             size_t len = 0;
             if (!ws_recv(ws, &data, &len)) {
                 ok = false;
                 break;
             }
-            handleMessage((const char*)data, len);
+            m_lastRecvMs = monoMs();
+            if (data)
+                handleMessage((const char*)data, len);
             free(data);
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                if (!m_outgoing.empty() || !m_tasks.empty())
-                    break;  // répondre vite à l'interface
-            }
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_outgoing.empty())
+                break;  // envoyer vite les coups de l'interface
         }
         if (!ok) {
             log_printf("OGS : websocket coupé, reconnexion dans %d s\n", m_reconnectDelay);
@@ -338,9 +366,9 @@ bool Ogs::fetchConfig()
         log_printf("OGS : ui/config renvoie un invité (jeton OAuth non accepté)\n");
         return false;
     }
-    m_jwt = r.value("user_jwt", "");
     m_userId = u.value("id", (int64_t)0);
     std::lock_guard<std::mutex> lock(m_mutex);
+    m_jwt = r.value("user_jwt", "");
     m_username = u.value("username", "");
     return true;
 }
@@ -369,9 +397,8 @@ void Ogs::openSession()
     setError("");
     setState(OgsState::Online);
     log_printf("OGS : connecté en tant que %s (%lld)\n", username().c_str(), (long long)m_userId.load());
+    m_reconnectNow = true;
     m_wantSocket = true;
-    m_nextConnectMs = 0;
-    m_reconnectDelay = 1;
     loadGames();
 }
 
@@ -423,8 +450,7 @@ void Ogs::logout()
         m_error.clear();
     }
     post([this] {
-        m_wantSocket = false;
-        closeSocket();
+        m_wantSocket = false;  // le fil websocket ferme la connexion
         if (!m_access.empty()) {
             long status;
             json r;
@@ -432,7 +458,10 @@ void Ogs::logout()
         }
         m_access.clear();
         m_refresh.clear();
-        m_jwt.clear();
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_jwt.clear();
+        }
         m_userId = 0;
         remove(AUTH_FILE);
     });
@@ -670,7 +699,12 @@ void Ogs::removedReject(int64_t id)
 
 void Ogs::connectSocket()
 {
-    if (m_jwt.empty())
+    std::string jwt;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        jwt = m_jwt;
+    }
+    if (jwt.empty())
         return;
     WsConn* ws = (WsConn*)calloc(1, sizeof(WsConn));
     if (!ws_connect(ws, OGS_HOST, 443, "/")) {
@@ -680,15 +714,17 @@ void Ogs::connectSocket()
         return;
     }
     m_ws = ws;
+    m_wsFd = ws->tls.tcp_fd;
+    m_lastRecvMs = monoMs();
     m_wsOpen = true;
     m_reconnectDelay = 1;
     log_printf("OGS : websocket ouvert\n");
 
     std::vector<std::string> first;
     first.push_back(json::array({"authenticate",
-                                 {{"jwt", m_jwt},
+                                 {{"jwt", jwt},
                                   {"client", "nxgo"},
-                                  {"client_version", "0.2"},
+                                  {"client_version", "0.2.1"},
                                   {"user_agent", "NXGo (Nintendo Switch)"},
                                   {"language", g_settings.lang == Lang::FR ? "fr" : "en"}}})
                         .dump());
@@ -710,6 +746,7 @@ void Ogs::connectSocket()
 
 void Ogs::closeSocket()
 {
+    m_wsFd = -1;
     if (m_ws) {
         ws_close((WsConn*)m_ws);
         free(m_ws);

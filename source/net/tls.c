@@ -90,6 +90,10 @@ bool tls_connect(TlsConn *t, const char *host, int port, int timeout_sec)
         tls_close(t);
         return false;
     }
+    t->timeout_ms = timeout_sec * 1000;
+    rc = sslConnectionSetIoMode(&t->conn, SslIoMode_NonBlocking);
+    if (R_FAILED(rc))
+        log_printf("TLS : mode non bloquant refusé (0x%x)\n", rc);
     return true;
 }
 
@@ -105,14 +109,55 @@ void tls_close(TlsConn *t)
     t->open = false;
 }
 
+// Mode non bloquant : le module SSL lit la socket en avance, donc on ne peut pas se fier
+// à poll() sur la socket seule pour savoir s'il reste des données à lire. On tente une
+// lecture, et on n'attend sur la socket que si le module n'a vraiment rien.
+static bool would_block(Result rc)
+{
+    return R_MODULE(rc) == 123 && R_DESCRIPTION(rc) == 204;  // nn::ssl ResultWouldBlock
+}
+
+static void wait_socket(TlsConn *t, short events, int timeout_ms)
+{
+    struct pollfd pfd = {.fd = t->tcp_fd, .events = events};
+    poll(&pfd, 1, timeout_ms);
+}
+
+// 1 : données en tampon, 0 : rien pour l'instant, -1 : connexion perdue
+static int tls_fill(TlsConn *t)
+{
+    if (t->buf_pos < t->buf_len)
+        return 1;
+    if (t->dead)
+        return -1;
+    u32 got = 0;
+    Result rc = sslConnectionRead(&t->conn, t->buf, sizeof(t->buf), &got);
+    if (R_SUCCEEDED(rc) && got > 0) {
+        t->buf_pos = 0;
+        t->buf_len = got;
+        return 1;
+    }
+    if (R_FAILED(rc) && would_block(rc))
+        return 0;
+    log_printf("TLS : lecture impossible (0x%x)\n", rc);
+    t->dead = true;
+    return -1;
+}
+
 bool tls_write_all(TlsConn *t, const void *data, size_t len)
 {
     const u8 *p = data;
+    u64 deadline = armTicksToNs(armGetSystemTick()) / 1000000ULL + t->timeout_ms;
     while (len > 0) {
         u32 written = 0;
         Result rc = sslConnectionWrite(&t->conn, p, len, &written);
+        if (R_FAILED(rc) && would_block(rc) && armTicksToNs(armGetSystemTick()) / 1000000ULL < deadline) {
+            wait_socket(t, POLLOUT, 100);
+            continue;
+        }
         if (R_FAILED(rc) || written == 0) {
             log_printf("TLS : erreur d'écriture (0x%x)\n", rc);
+            t->dead = true;
             return false;
         }
         p += written;
@@ -124,16 +169,19 @@ bool tls_write_all(TlsConn *t, const void *data, size_t len)
 bool tls_read_exact(TlsConn *t, void *out, size_t len)
 {
     u8 *dst = out;
+    u64 deadline = armTicksToNs(armGetSystemTick()) / 1000000ULL + t->timeout_ms;
     while (len > 0) {
-        if (t->buf_pos == t->buf_len) {
-            u32 got = 0;
-            Result rc = sslConnectionRead(&t->conn, t->buf, sizeof(t->buf), &got);
-            if (R_FAILED(rc) || got == 0) {
-                log_printf("TLS : erreur de lecture (0x%x)\n", rc);
+        int r = tls_fill(t);
+        if (r < 0)
+            return false;
+        if (r == 0) {
+            if (armTicksToNs(armGetSystemTick()) / 1000000ULL >= deadline) {
+                log_printf("TLS : délai de lecture dépassé\n");
+                t->dead = true;
                 return false;
             }
-            t->buf_pos = 0;
-            t->buf_len = got;
+            wait_socket(t, POLLIN, 100);
+            continue;
         }
         u32 n = t->buf_len - t->buf_pos;
         if (n > len)
@@ -148,14 +196,10 @@ bool tls_read_exact(TlsConn *t, void *out, size_t len)
 
 bool tls_readable(TlsConn *t, int timeout_ms)
 {
-    if (t->buf_pos < t->buf_len)
-        return true;
-    s32 pending = 0;
-    if (R_SUCCEEDED(sslConnectionPending(&t->conn, &pending)) && pending > 0)
-        return true;
-    // Données chiffrées en attente sur la socket (le module SSL lit la même socket)
-    struct pollfd pfd = {.fd = t->tcp_fd, .events = POLLIN};
-    int n = poll(&pfd, 1, timeout_ms);
-    // Erreur ou coupure : on laisse la lecture la constater
-    return n != 0;
+    int r = tls_fill(t);
+    if (r == 0) {
+        wait_socket(t, POLLIN, timeout_ms);
+        r = tls_fill(t);
+    }
+    return r != 0;  // une erreur aussi : la lecture la constatera
 }
