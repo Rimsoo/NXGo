@@ -33,7 +33,7 @@ void settings_load()
     FILE* f = fopen(CONFIG_FILE, "r");
     if (!f)
         return;
-    char line[128];
+    char line[256];
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\r\n")] = '\0';
         char* eq = strchr(line, '=');
@@ -63,6 +63,14 @@ void settings_load()
             g_settings.handicap = n;
         else if (!strcmp(key, "rules"))
             g_settings.rules = n;
+        else if (!strcmp(key, "ogs_size"))
+            g_settings.ogsSize = n;
+        else if (!strcmp(key, "ogs_speed"))
+            g_settings.ogsSpeed = n;
+        else if (!strcmp(key, "ogs_client_id"))
+            g_settings.ogsClientPassword = val;
+        else if (!strcmp(key, "ogs_user"))
+            g_settings.ogsUser = val;
     }
     fclose(f);
 }
@@ -80,6 +88,11 @@ void settings_save()
     fprintf(f, "coords=%d\nownership=%d\n", s.showCoords, s.showOwnership);
     fprintf(f, "board_size=%d\ncolor=%d\nai_level=%d\nhandicap=%d\nrules=%d\n", s.boardSize, s.color, s.aiLevel,
             s.handicap, s.rules);
+    fprintf(f, "ogs_size=%d\nogs_speed=%d\n", s.ogsSize, s.ogsSpeed);
+    if (!s.ogsUser.empty())
+        fprintf(f, "ogs_user=%s\n", s.ogsUser.c_str());
+    if (!s.ogsClientPassword.empty())
+        fprintf(f, "ogs_client_id=%s\n", s.ogsClientPassword.c_str());
     fclose(f);
 }
 

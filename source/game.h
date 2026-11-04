@@ -43,11 +43,13 @@ struct ScoreResult {
     std::vector<bool> dead;
 };
 
-enum class EndReason { None, Score, Resign };
+enum class EndReason { None, Score, Resign, Other };  // Other : temps, annulation… (en ligne)
 
 class Game {
 public:
     void start(const GameSetup& setup);
+    // Position de départ quelconque (partie en ligne : pierres posées, handicap libre).
+    void startFrom(const GameSetup& setup, const Board& initial, Player first);
     bool loadSgf(const std::string& path, std::string& error);
     bool saveSgf(const std::string& path) const;
 
@@ -55,6 +57,10 @@ public:
     GameSetup& setup() { return m_setup; }
     int size() const { return m_setup.size; }
     const Board& board() const { return m_board; }
+    const Board& initialBoard() const { return m_initialBoard; }
+    Player initialPlayer() const { return m_initialPla; }
+    const std::vector<Move>& moves() const { return m_moves; }
+    Rules rules() const { return makeRules(); }
     const BoardHistory& history() const { return m_hist; }
     Player toPlay() const { return m_toPlay; }
     PlayerKind kindToPlay() const { return m_toPlay == P_BLACK ? m_setup.black : m_setup.white; }
@@ -73,6 +79,9 @@ public:
     // Joue au curseur ; s'il y avait une suite, elle est remplacée.
     bool play(Loc loc);
     void pass() { play(Board::PASS_LOC); }
+    // Ajoute en fin de partie un coup décidé ailleurs (serveur OGS), sans vérifier
+    // la légalité ni l'alternance (pierres de handicap). Le curseur suit s'il était au bout.
+    void appendForced(Loc loc, Player pla);
     // Deux passes consécutifs : la partie attend le décompte.
     bool bothPassed() const;
 
@@ -90,7 +99,13 @@ public:
     void resign(Player loser);
     // Décompte à partir de l'estimation de territoire de KataGo (+1 Blanc, -1 Noir).
     void scoreWithOwnership(const std::vector<float>& ownership);
+    // Décompte par simple remplissage, à partir des pierres marquées mortes par les joueurs
+    // (phase de retrait des pierres d'OGS) : aucune IA. `dead` : (y * taille + x).
+    // Une intersection vide marquée compte comme dame (neutre).
+    ScoreResult scoreWithDead(const std::vector<bool>& dead) const;
     void resumePlay();  // reprend après un décompte contesté
+    // Résultat décidé ailleurs (OGS). `score` peut être invalide ; `text` ex. "W+T".
+    void setExternalResult(EndReason reason, Player winner, const ScoreResult& score, const std::string& text);
     bool finished() const { return m_end != EndReason::None; }
     std::string resultString() const;  // "B+3.5", "W+R"...
 
@@ -114,4 +129,5 @@ private:
     EndReason m_end = EndReason::None;
     Player m_winner = C_EMPTY;
     ScoreResult m_score;
+    std::string m_resultText;  // résultat imposé (OGS), prioritaire
 };

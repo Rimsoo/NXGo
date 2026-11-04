@@ -42,9 +42,9 @@ APP_TITLE	:=	NXGo
 APP_AUTHOR	:=	Rimso
 APP_VERSION	:=	0.1.0
 BUILD		:=	build
-SOURCES		:=	source
+SOURCES		:=	source source/net
 DATA		:=	data
-INCLUDES	:=	include
+INCLUDES	:=	include source
 ROMFS	:=	romfs
 
 #---------------------------------------------------------------------------------
@@ -57,6 +57,10 @@ CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
 
 CFLAGS	+=	$(INCLUDE) -D__SWITCH__
 
+# Application OAuth publique d'NXGo sur online-go.com (grant "password", sans secret)
+OGS_CLIENT_ID	?=	uPs4SZw6MBvacOWVfrNaYn9gfKbtPW78AgXQ1T4n
+CFLAGS	+=	-DOGS_CLIENT_PASSWORD=\"$(OGS_CLIENT_ID)\"
+
 KATAGO_PORT := $(TOPDIR)/katago_port
 CXXFLAGS	:= $(CFLAGS) -std=c++17 -Wno-sign-compare -D__unix=1 -DBYTE_ORDER=1234 -DLITTLE_ENDIAN=1234 -DBIG_ENDIAN=4321 -DUSE_EIGEN_BACKEND \
 			-include $(KATAGO_PORT)/include/switch_compat.h -I$(KATAGO_PORT)/include \
@@ -65,7 +69,7 @@ CXXFLAGS	:= $(CFLAGS) -std=c++17 -Wno-sign-compare -D__unix=1 -DBYTE_ORDER=1234 
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:= -L$(KATAGO_PORT)/build -lkatago -lz -lnx -lm
+LIBS	:= -L$(KATAGO_PORT)/build -lkatago -lcurl -lz -lnx -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
@@ -161,7 +165,7 @@ ifneq ($(ROMFS),)
 	export NROFLAGS += --romfsdir=$(CURDIR)/$(ROMFS)
 endif
 
-.PHONY: $(BUILD) clean all
+.PHONY: $(BUILD) clean all nsp
 
 #---------------------------------------------------------------------------------
 all: $(BUILD)
@@ -171,10 +175,13 @@ $(BUILD):
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
 #---------------------------------------------------------------------------------
+nsp: $(BUILD)
+	@tools/make_nsp.sh
+
 clean:
 	@echo clean ...
 ifeq ($(strip $(APP_JSON)),)
-	@rm -fr $(BUILD) $(TARGET).nro $(TARGET).nacp $(TARGET).elf
+	@rm -fr $(BUILD) $(TARGET).nro $(TARGET).nacp $(TARGET).elf $(TARGET).nsp
 else
 	@rm -fr $(BUILD) $(TARGET).nsp $(TARGET).nso $(TARGET).npdm $(TARGET).elf
 endif

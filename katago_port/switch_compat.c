@@ -3,7 +3,8 @@
 #include <string.h>
 #include "include/switch_compat.h"
 
-int gethostname(char *name, size_t len) {
+// Faible : libnx fournit la vraie dès que son résolveur DNS est lié (client OGS).
+__attribute__((weak)) int gethostname(char *name, size_t len) {
   if (len < 7) { errno = ENAMETOOLONG; return -1; }
   strcpy(name, "switch");
   return 0;

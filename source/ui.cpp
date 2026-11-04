@@ -10,34 +10,15 @@
 #include "gfx.h"
 #include "log.h"
 #include "settings.h"
+#include "ui_widgets.h"
 
-// ------------------------------------------------------------------ thème
-
-static const GfxColor BG = RGB(24, 27, 34);
-static const GfxColor PANEL = RGB(36, 40, 50);
-static const GfxColor PANEL_HI = RGB(50, 56, 70);
-static const GfxColor TEXT = RGB(236, 238, 241);
-static const GfxColor DIM = RGB(150, 156, 168);
-static const GfxColor ACCENT = RGB(74, 163, 255);
-static const GfxColor WOOD = RGB(226, 186, 116);
-static const GfxColor DANGER = RGB(235, 90, 80);
-
-static const int BOARD_SIDE = 704;
-static const int BOARD_X = 8, BOARD_Y = 8;
-static const int PANEL_X = 736, PANEL_W = 528;
-
-struct Rect {
-    int x, y, w, h;
-    bool tapped(const Input& in) const { return in.tapIn(x, y, w, h); }
-};
-
-static u64 nowMs()
+u64 nowMs()
 {
     return armTicksToNs(armGetSystemTick()) / 1000000ULL;
 }
 
 // Pastille de bouton manette : "A", "B", "X", "Y", "L", "R", "+", "-", "ZL", "ZR".
-static int drawGlyph(int x, int y, const char* label, int size = 26)
+int drawGlyph(int x, int y, const char* label, int size)
 {
     int w = std::max(size, gfx_text_width(size * 6 / 10, label) + size / 2);
     gfx_round_rect(x, y, w, size, size / 2, RGB(220, 224, 232));
@@ -47,7 +28,7 @@ static int drawGlyph(int x, int y, const char* label, int size = 26)
 }
 
 // Barre d'aide en bas de l'écran : paires (bouton, action).
-static void drawHints(const std::vector<std::pair<const char*, std::string>>& hints, int y = 684)
+void drawHints(const std::vector<std::pair<const char*, std::string>>& hints, int y)
 {
     int total = 0;
     for (auto& h : hints)
@@ -59,8 +40,8 @@ static void drawHints(const std::vector<std::pair<const char*, std::string>>& hi
     }
 }
 
-static void drawButton(const Rect& r, const std::string& label, const char* glyph, bool focused, bool enabled = true,
-                       bool active = false)
+void drawButton(const Rect& r, const std::string& label, const char* glyph, bool focused, bool enabled,
+                bool active)
 {
     GfxColor bg = active ? RGB(40, 92, 150) : (focused ? PANEL_HI : PANEL);
     gfx_round_rect(r.x, r.y, r.w, r.h, 14, bg);
@@ -75,19 +56,14 @@ static void drawButton(const Rect& r, const std::string& label, const char* glyp
     gfx_text_fit(tx, r.y + (r.h - fs) / 2 - 2, fs, tc, label.c_str(), r.x + r.w - tx - 12);
 }
 
-static void drawTitle(const char* title, const char* subtitle = nullptr)
+void drawTitle(const char* title, const char* subtitle)
 {
     gfx_text(64, 40, 40, TEXT, title);
     if (subtitle)
         gfx_text(66, 92, 22, DIM, subtitle);
 }
 
-// Ligne "réglage" : libellé à gauche, valeur entre deux flèches à droite.
-struct ValueRow {
-    Rect row, left, right;
-};
-
-static ValueRow valueRowRect(int index, int top = 150)
+ValueRow valueRowRect(int index, int top)
 {
     ValueRow r;
     r.row = {120, top + index * 74, 1040, 62};
@@ -96,7 +72,7 @@ static ValueRow valueRowRect(int index, int top = 150)
     return r;
 }
 
-static void drawValueRow(const ValueRow& r, const char* label, const std::string& value, bool focused, bool enabled = true)
+void drawValueRow(const ValueRow& r, const char* label, const std::string& value, bool focused, bool enabled)
 {
     gfx_round_rect(r.row.x, r.row.y, r.row.w, r.row.h, 14, focused ? PANEL_HI : PANEL);
     if (focused)
@@ -112,7 +88,7 @@ static void drawValueRow(const ValueRow& r, const char* label, const std::string
 }
 
 // -1 / +1 si la valeur de cette ligne doit changer (flèches touchées ou gauche/droite).
-static int valueRowDelta(const Input& in, const ValueRow& r, bool focused)
+int valueRowDelta(const Input& in, const ValueRow& r, bool focused)
 {
     if (r.left.tapped(in))
         return -1;
@@ -150,6 +126,12 @@ App::App(Engine& engine) : m_engine(engine)
     const char* moves[] = {"E5", "C4", "G4", "D6", "F7", "C7", "D3", "C3", "F3", "G6"};
     for (const char* m : moves)
         m_demo.play(Location::ofString(m, m_demo.board()));
+    m_ogs.start();
+}
+
+App::~App()
+{
+    m_ogs.stop();
 }
 
 void App::toast(const std::string& msg)
@@ -164,6 +146,14 @@ bool App::frame()
     const Input& in = input_update();
     if (in.down || in.touching || in.released)
         m_dirty = true;
+
+    ogsStep();
+    // Pendule en ligne, et écran OGS dont l'état change depuis le fil réseau
+    bool live = (m_screen == Screen::Game && m_mode == Mode::Online) || m_screen == Screen::Ogs;
+    if (live && nowMs() - m_lastClockDraw >= 250) {
+        m_lastClockDraw = nowMs();
+        m_dirty = true;
+    }
 
     if (m_wasLoading && !m_engine.loading()) {
         m_wasLoading = false;
@@ -279,7 +269,11 @@ void App::updateMenu(const Input& in)
         m_screen = Screen::SgfList;
         break;
     }
-    case MI_OGS: m_screen = Screen::Ogs; break;
+    case MI_OGS:
+        m_ogsFocus = 0;
+        m_ogs.refreshGames();
+        m_screen = Screen::Ogs;
+        break;
     case MI_SETTINGS:
         m_settingsFocus = 0;
         m_screen = Screen::Settings;
@@ -295,12 +289,12 @@ void App::drawMenu()
     gfx_text(68, 124, 24, DIM, L("Go with KataGo, on Switch", "Le go avec KataGo, sur Switch"));
     for (int i = 0; i < MI_COUNT; i++) {
         drawButton(menuRect(i), menuLabel(i), nullptr, i == m_menuFocus);
-        if (i == MI_OGS) {
-            const char* soon = L("Soon", "Bientôt");
+        if (i == MI_OGS && m_ogs.state() == OgsState::Online) {
+            std::string who = m_ogs.username();
             Rect r = menuRect(i);
-            int w = gfx_text_width(18, soon) + 24;
-            gfx_round_rect(r.x + r.w - w - 16, r.y + 15, w, 28, 14, RGB(90, 70, 30));
-            gfx_text(r.x + r.w - w - 4, r.y + 19, 18, WOOD, soon);
+            int w = std::min(gfx_text_width(18, who.c_str()), 160) + 24;
+            gfx_round_rect(r.x + r.w - w - 16, r.y + 15, w, 28, 14, RGB(30, 70, 40));
+            gfx_text_fit(r.x + r.w - w - 4, r.y + 19, 18, GOOD, who.c_str(), 160);
         }
     }
 
@@ -453,6 +447,7 @@ void App::drawSetup()
 
 void App::startGame()
 {
+    m_backToOgs = false;
     const Settings& s = g_settings;
     GameSetup setup;
     setup.size = s.boardSize;
@@ -485,12 +480,16 @@ void App::startGame()
 
 void App::openSandbox()
 {
+    m_backToOgs = false;
     GameSetup setup;
     setup.size = g_settings.boardSize;
     setup.rules = g_settings.rules ? RulesKind::Chinese : RulesKind::Japanese;
     setup.komi = g_settings.rules ? 7.5f : 6.5f;
     setup.black = setup.white = PlayerKind::Human;
     m_mode = Mode::Sandbox;
+    m_scanMoves.clear();
+    m_refined.clear();
+    m_scanKey = 0;
     m_game.start(setup);
     m_analysisOn = true;
     m_cursor = Location::getLoc(setup.size / 2, setup.size / 2, setup.size);
@@ -503,6 +502,7 @@ void App::openSandbox()
 
 bool App::openSgf(const std::string& path)
 {
+    m_backToOgs = false;
     std::string err;
     m_engine.stopAll();
     if (!m_game.loadSgf(path, err)) {
@@ -510,6 +510,9 @@ bool App::openSgf(const std::string& path)
         return false;
     }
     m_mode = Mode::Sandbox;
+    m_scanMoves.clear();
+    m_refined.clear();
+    m_scanKey = 0;
     m_analysisOn = true;
     m_cursor = Location::getLoc(m_game.size() / 2, m_game.size() / 2, m_game.size());
     m_aiRequested = m_analysisPos = 0;
@@ -528,6 +531,9 @@ bool App::humanCanPlay() const
 {
     if (m_paused)
         return false;
+    if (m_mode == Mode::Online)
+        return m_online.loaded && m_online.phase == "play" && !m_game.finished() && m_game.atEnd() && ogsMyTurn() &&
+               !m_online.movePending;
     if (m_mode == Mode::Sandbox)
         return !(m_game.finished() && m_game.atEnd());  // en revue : jouer une variante remplace la suite
     if (m_game.finished())
@@ -537,10 +543,26 @@ bool App::humanCanPlay() const
 
 void App::tryPlay(Loc loc)
 {
+    if (m_mode == Mode::Online && m_online.phase == "stone removal" && loc != Board::NULL_LOC) {
+        ogsToggleGroup(loc);
+        return;
+    }
     if (loc == Board::NULL_LOC || !humanCanPlay())
         return;
     if (m_game.board().colors[loc] != C_EMPTY)
         return;
+    if (m_mode == Mode::Online) {
+        // Le serveur décide ; le coup s'affiche à son retour. Hors handicap libre, on filtre ko/suicide.
+        bool handicapPhase = m_online.freeHandicap && m_game.moveCount() < m_online.handicap;
+        if (!handicapPhase && !m_game.isLegal(loc)) {
+            toast(L("Illegal move (ko or suicide)", "Coup illégal (ko ou suicide)"));
+            return;
+        }
+        m_ogs.gameMove(m_online.gameId, Location::getX(loc, m_game.size()), Location::getY(loc, m_game.size()));
+        m_online.movePending = true;
+        m_dirty = true;
+        return;
+    }
     if (!m_game.play(loc)) {
         toast(L("Illegal move (ko or suicide)", "Coup illégal (ko ou suicide)"));
         return;
@@ -552,6 +574,12 @@ void App::doPass()
 {
     if (!humanCanPlay())
         return;
+    if (m_mode == Mode::Online) {
+        m_ogs.gameMove(m_online.gameId, -1, -1);
+        m_online.movePending = true;
+        m_dirty = true;
+        return;
+    }
     Player p = m_game.toPlay();
     m_game.pass();
     toast(p == P_BLACK ? L("Black passes", "Noir passe") : L("White passes", "Blanc passe"));
@@ -566,6 +594,8 @@ void App::afterMove()
 
 void App::undo()
 {
+    if (m_mode == Mode::Online)
+        return;
     if (m_mode == Mode::Sandbox) {
         m_game.back();
         m_dirty = true;
@@ -604,7 +634,8 @@ void App::saveSgf()
 // Fait avancer l'IA et l'analyse ; appelé à chaque image sur l'écran de partie.
 void App::stepEngine()
 {
-    if (!m_engine.ready())
+    // En ligne : jamais d'IA tant que la partie dure (règle d'OGS), pas même pour le décompte
+    if (!m_engine.ready() || m_mode == Mode::Online)
         return;
 
     // Coup de l'IA reçu ?
@@ -661,6 +692,7 @@ void App::stepEngine()
 
     if (m_engine.getAnalysis(m_snapshot, m_snapVersion))
         m_dirty = true;
+    stepScoreGraph();
 
     if (scoring && m_snapshot.valid && m_snapshot.positionId == m_game.positionId() &&
         m_snapshot.visits >= std::min<int64_t>(60, g_settings.analysisVisits)) {
@@ -685,12 +717,15 @@ static std::vector<std::pair<Rect, int>> gameButtons(bool sandbox)
 {
     int x = PANEL_X, w = (PANEL_W - 16) / 2, h = 60;
     int y = 470;
-    if (sandbox)
-        return {{{x, y, w, h}, GA_PREV},
-                {{x + w + 16, y, w, h}, GA_NEXT},
-                {{x, y + h + 14, w, h}, GA_PASS},
-                {{x + w + 16, y + h + 14, w, h}, GA_ANALYSIS},
-                {{x, y + 2 * (h + 14), w, h}, GA_MENU}};
+    if (sandbox) {
+        // Trois colonnes sur deux lignes : la courbe de score prend la place au-dessus
+        int w3 = (PANEL_W - 32) / 3, h2 = 56, y2 = 550;
+        return {{{x, y2, w3, h2}, GA_PREV},
+                {{x + w3 + 16, y2, w3, h2}, GA_NEXT},
+                {{x + 2 * (w3 + 16), y2, w3, h2}, GA_PASS},
+                {{x, y2 + h2 + 10, w3, h2}, GA_ANALYSIS},
+                {{x + w3 + 16, y2 + h2 + 10, w3, h2}, GA_MENU}};
+    }
     return {{{x, y, w, h}, GA_PASS},
             {{x + w + 16, y, w, h}, GA_UNDO},
             {{x, y + h + 14, w, h}, GA_ANALYSIS},
@@ -724,7 +759,7 @@ void App::updateGame(const Input& in)
     // Fin de partie (après décompte ou abandon) : panneau de choix
     bool showEnd = m_game.finished() && m_mode != Mode::Sandbox;
     if (showEnd) {
-        bool canResume = m_game.endReason() == EndReason::Score;
+        bool canResume = m_game.endReason() == EndReason::Score && m_mode != Mode::Online;
         auto buttons = endButtons(canResume);
         int count = (int)buttons.size();
         if (in.repeated(HidNpadButton_AnyUp))
@@ -737,9 +772,24 @@ void App::updateGame(const Input& in)
         for (auto& b : buttons)
             if (b.first.tapped(in))
                 action = b.second;
+        if (m_mode == Mode::Online && (action == EA_MENU || in.pressed(HidNpadButton_B))) {
+            ogsLeaveGame();
+            return;
+        }
         switch (action) {
         case EA_REVIEW:
+            if (m_mode == Mode::Online) {
+                m_ogs.gameDisconnect(m_online.gameId);
+                m_online = Online();
+                m_backToOgs = true;
+            }
             m_mode = Mode::Sandbox;
+            m_scanMoves.clear();
+            m_refined.clear();
+            m_scanKey = 0;
+    m_scanMoves.clear();
+    m_refined.clear();
+    m_scanKey = 0;
             m_analysisOn = true;
             m_analysisPos = 0;
             break;
@@ -762,6 +812,14 @@ void App::updateGame(const Input& in)
             m_engine.stopAll();
             m_screen = Screen::Menu;
         }
+        return;
+    }
+
+    // Courbe de score : toucher ou glisser pour aller à un coup
+    if (m_mode == Mode::Sandbox && in.touching && in.touchIn(PANEL_X, GRAPH_Y, PANEL_W, GRAPH_H) &&
+        in.startY >= GRAPH_Y && in.startY < GRAPH_Y + GRAPH_H && m_game.moveCount() > 0) {
+        float t = (float)(in.x - (PANEL_X + 12)) / (PANEL_W - 24);
+        m_game.goTo((int)std::lround(std::clamp(t, 0.0f, 1.0f) * m_game.moveCount()));
         return;
     }
 
@@ -805,6 +863,11 @@ void App::updateGame(const Input& in)
         if (m_cursorVisible)
             tryPlay(m_cursor);
         m_cursorVisible = true;
+    }
+
+    if (m_mode == Mode::Online) {
+        updateOnline(in);
+        return;
     }
 
     // Boutons (manette + tactile)
@@ -898,7 +961,15 @@ void App::drawGame()
     }
     if (m_game.finished() && m_game.score().valid && m_game.atEnd())
         opt.score = &m_game.score();
-    m_view.draw(m_game, opt);
+    if (m_mode == Mode::Online && m_online.phase == "stone removal")
+        opt.score = &m_online.removal;
+    if (m_mode == Mode::Online && !m_online.loaded) {
+        gfx_rect(BOARD_X, BOARD_Y, BOARD_SIDE, BOARD_SIDE, PANEL);
+        const char* msg = L("Loading the game…", "Chargement de la partie…");
+        gfx_text(BOARD_X + (BOARD_SIDE - gfx_text_width(26, msg)) / 2, BOARD_Y + BOARD_SIDE / 2 - 13, 26, DIM, msg);
+    } else {
+        m_view.draw(m_game, opt);
+    }
 
     // Cartes des joueurs
     int modeIdx = m_mode == Mode::VsAI ? 0 : (m_mode == Mode::TwoPlayers ? 1 : 2);
@@ -906,16 +977,27 @@ void App::drawGame()
         Player p = i == 0 ? P_BLACK : P_WHITE;
         int y = 16 + i * 100;
         bool toPlay = m_game.toPlay() == p && !m_game.finished();
+        if (m_mode == Mode::Online)
+            toPlay = m_online.loaded && m_online.phase == "play" && m_online.next == p;
         gfx_round_rect(PANEL_X, y, PANEL_W, 88, 16, toPlay ? PANEL_HI : PANEL);
         if (toPlay)
             gfx_round_rect(PANEL_X, y, 6, 88, 3, ACCENT);
         BoardView::drawStoneIcon(PANEL_X + 46, y + 44, 24, p);
-        gfx_text_fit(PANEL_X + 86, y + 14, 26, TEXT, playerName(m_game, p, modeIdx).c_str(), PANEL_W - 230);
+        std::string name = m_mode == Mode::Online ? ogsPlayerName(p) : playerName(m_game, p, modeIdx);
+        bool clockLine = m_mode == Mode::Online && m_online.hasClock;
+        gfx_text_fit(PANEL_X + 86, clockLine ? y + 8 : y + 14, clockLine ? 24 : 26, TEXT, name.c_str(), PANEL_W - 230);
         int prisoners = p == P_BLACK ? m_game.board().numWhiteCaptures : m_game.board().numBlackCaptures;
         std::string sub = strf("%s %d", L("Prisoners:", "Prisonniers :"), prisoners);
         if (p == P_WHITE)
             sub += strf("   ·   komi %g", m_game.setup().komi);
-        gfx_text(PANEL_X + 86, y + 50, 20, DIM, sub.c_str());
+        if (clockLine) {
+            // Pendule sous les prisonniers et le komi
+            gfx_text(PANEL_X + 86, y + 38, 18, DIM, sub.c_str());
+            std::string clock = ogsClockText(p);
+            gfx_text(PANEL_X + 86, y + 60, 22, toPlay ? ACCENT : TEXT, clock.c_str());
+        } else {
+            gfx_text(PANEL_X + 86, y + 50, 20, DIM, sub.c_str());
+        }
         if (toPlay) {
             std::string st;
             if (m_game.kindOf(p) == PlayerKind::Engine && m_engine.thinking()) {
@@ -923,6 +1005,8 @@ void App::drawGame()
                 st = std::string(L("thinking", "réfléchit")) + std::string(dots, '.');
             } else if (m_game.kindOf(p) == PlayerKind::Engine && m_engine.loading()) {
                 st = L("loading…", "chargement…");
+            } else if (m_mode == Mode::Online && m_online.movePending) {
+                st = L("sending…", "envoi…");
             } else {
                 st = L("to play", "à jouer");
             }
@@ -934,6 +1018,13 @@ void App::drawGame()
     if (m_game.finished() && m_mode != Mode::Sandbox) {
         drawEndPanel(PANEL_X, 228, PANEL_W);
         drawHints({{"A", L("Select", "Choisir")}, {"B", L("Menu", "Menu")}});
+        return;
+    }
+
+    if (m_mode == Mode::Online) {
+        drawOnlinePanel();
+        if (m_paused)
+            drawPause();
         return;
     }
 
@@ -989,20 +1080,28 @@ void App::drawGame()
         else
             info += strf("   ·   %s %s", who, Game::coordString(last, n).c_str());
     }
-    gfx_text(PANEL_X + 4, 386, 24, TEXT, info.c_str());
-    if (m_game.finished())
-        gfx_text(PANEL_X + 4, 422, 22, WOOD, strf("%s %s", L("Result:", "Résultat :"), m_game.resultString().c_str()).c_str());
+    bool sandbox = m_mode == Mode::Sandbox;
+    if (sandbox) {
+        if (m_game.finished() || !m_game.resultString().empty())
+            info += strf("   ·   %s", m_game.resultString().c_str());
+        gfx_text_fit(PANEL_X + 4, 372, 22, TEXT, info.c_str(), PANEL_W - 8);
+        drawScoreGraph();
+    } else {
+        gfx_text(PANEL_X + 4, 386, 24, TEXT, info.c_str());
+        if (m_game.finished())
+            gfx_text(PANEL_X + 4, 422, 22, WOOD,
+                     strf("%s %s", L("Result:", "Résultat :"), m_game.resultString().c_str()).c_str());
+    }
 
     // Boutons
-    bool sandbox = m_mode == Mode::Sandbox;
     for (auto& b : gameButtons(sandbox)) {
         switch (b.second) {
         case GA_PASS: drawButton(b.first, L("Pass", "Passer"), "Y", false, humanCanPlay()); break;
         case GA_UNDO: drawButton(b.first, L("Undo", "Annuler"), "L", false, m_game.cursor() > 0); break;
         case GA_ANALYSIS: drawButton(b.first, L("Analysis", "Analyse"), "X", false, aiAssistAllowed(), m_analysisOn); break;
         case GA_MENU: drawButton(b.first, L("Menu", "Menu"), "+", false); break;
-        case GA_PREV: drawButton(b.first, L("Previous", "Précédent"), "L", false, m_game.cursor() > 0); break;
-        case GA_NEXT: drawButton(b.first, L("Next", "Suivant"), "R", false, !m_game.atEnd()); break;
+        case GA_PREV: drawButton(b.first, L("Prev.", "Préc."), "L", false, m_game.cursor() > 0); break;
+        case GA_NEXT: drawButton(b.first, L("Next", "Suiv."), "R", false, !m_game.atEnd()); break;
         }
     }
 
@@ -1015,13 +1114,117 @@ void App::drawGame()
         drawPause();
 }
 
+// ------------------------------------------------------------------ courbe de score
+
+static uint64_t movesKey(const Game& g)
+{
+    uint64_t h = 1469598103934665603ULL ^ (uint64_t)g.size();
+    for (const Move& m : g.moves())
+        h = (h ^ (uint64_t)(m.loc * 3 + m.pla)) * 1099511628211ULL;
+    return h;
+}
+
+void App::stepScoreGraph()
+{
+    if (m_mode != Mode::Sandbox || !m_engine.ready())
+        return;
+    uint64_t key = movesKey(m_game);
+    if (key != m_scanKey) {
+        // Nouvelle partie ou variante : on garde les valeurs du début commun
+        m_scanKey = key;
+        const std::vector<Move>& moves = m_game.moves();
+        size_t common = 0;
+        while (common < moves.size() && common < m_scanMoves.size() && moves[common].loc == m_scanMoves[common].loc &&
+               moves[common].pla == m_scanMoves[common].pla)
+            common++;
+        if (m_scanMoves.empty() && common == 0)
+            m_refined.clear();
+        m_refined.resize(std::min(m_refined.size(), common + 1));
+        m_refined.resize(moves.size() + 1, NAN);
+        m_scanMoves = moves;
+        m_engine.startScan(m_game.initialBoard(), m_game.initialPlayer(), m_game.rules(), m_game.moves());
+        m_scanVersion = 0;
+    }
+    if (m_engine.getScan(m_scanLead, m_scanVersion))
+        m_dirty = true;
+    // L'analyse complète de la position affichée remplace l'estimation rapide
+    int c = m_game.cursor();
+    if (m_snapshot.valid && m_snapshot.positionId == m_game.positionId() && c < (int)m_refined.size() &&
+        m_snapshot.visits >= std::min<int64_t>(100, g_settings.analysisVisits)) {
+        if (m_refined[c] != (float)m_snapshot.leadBlack) {
+            m_refined[c] = (float)m_snapshot.leadBlack;
+            m_dirty = true;
+        }
+    }
+}
+
+void App::drawScoreGraph()
+{
+    int x = PANEL_X, y = GRAPH_Y, w = PANEL_W, h = GRAPH_H;
+    gfx_round_rect(x, y, w, h, 14, PANEL);
+    int n = m_game.moveCount() + 1;
+    std::vector<float> v(n, NAN);
+    for (int i = 0; i < n; i++) {
+        if (i < (int)m_refined.size() && !std::isnan(m_refined[i]))
+            v[i] = m_refined[i];
+        else if (i < (int)m_scanLead.size())
+            v[i] = m_scanLead[i];
+    }
+    float peak = 10;
+    int known = 0;
+    for (float f : v)
+        if (!std::isnan(f)) {
+            peak = std::max(peak, std::fabs(f));
+            known++;
+        }
+    float scale = std::ceil(peak / 5) * 5;
+
+    int gx = x + 12, gw = w - 24, gy = y + 30, gh = h - 40;
+    int mid = gy + gh / 2;
+    gfx_rect(gx, gy, gw, gh, RGB(112, 118, 132));
+    if (n > 1) {
+        float step = (float)gw / (n - 1);
+        int bw = std::max(1, (int)std::ceil(step));
+        for (int i = 0; i < n; i++) {
+            if (std::isnan(v[i]))
+                continue;
+            int bx = gx + (int)(i * step) - bw / 2;
+            bx = std::clamp(bx, gx, gx + gw - bw);
+            int len = (int)(std::fabs(v[i]) / scale * (gh / 2));
+            if (v[i] >= 0)
+                gfx_rect(bx, mid - len, bw, len, RGB(18, 18, 22));
+            else
+                gfx_rect(bx, mid, bw, len, RGB(240, 240, 236));
+        }
+        int cx = gx + (int)(m_game.cursor() * step);
+        gfx_rect(std::clamp(cx - 1, gx, gx + gw - 2), gy, 2, gh, ACCENT);
+    }
+    gfx_rect(gx, mid, gw, 1, RGB(160, 166, 178));
+
+    // Légende : valeur au coup affiché
+    std::string label;
+    int c = m_game.cursor();
+    if (c < n && !std::isnan(v[c])) {
+        float lead = v[c];
+        label = strf("%s +%.1f", lead >= 0 ? L("Black", "Noir") : L("White", "Blanc"), std::fabs(lead));
+    } else {
+        label = L("Score per move", "Score par coup");
+    }
+    gfx_text(x + 14, y + 5, 20, TEXT, label.c_str());
+    std::string right = known < n && m_engine.scanning() ? strf("%s %d/%d", L("computing", "calcul"), known, n)
+                                                          : strf("±%g %s", scale, L("pts", "pts"));
+    gfx_text(x + w - 14 - gfx_text_width(18, right.c_str()), y + 7, 18, DIM, right.c_str());
+}
+
 void App::drawEndPanel(int x, int y, int w)
 {
     gfx_round_rect(x, y, w, 176, 16, PANEL);
     std::string title;
     Player win = m_game.winner();
     const ScoreResult& s = m_game.score();
-    if (m_game.endReason() == EndReason::Resign)
+    if (m_mode == Mode::Online && !m_online.outcome.empty())
+        title = m_online.outcome;
+    else if (m_game.endReason() == EndReason::Resign)
         title = win == P_BLACK ? L("Black wins by resignation", "Noir gagne par abandon")
                                : L("White wins by resignation", "Blanc gagne par abandon");
     else if (win == C_EMPTY)
@@ -1045,10 +1248,12 @@ void App::drawEndPanel(int x, int y, int w)
         }
         gfx_text_fit(x + 20, y + 68, 22, TEXT, lb.c_str(), w - 40);
         gfx_text_fit(x + 20, y + 100, 22, TEXT, lw.c_str(), w - 40);
-        gfx_text_fit(x + 20, y + 136, 18, DIM, L("Dead stones estimated by KataGo.", "Pierres mortes estimées par KataGo."),
+        gfx_text_fit(x + 20, y + 136, 18, DIM,
+                     m_mode == Mode::Online ? L("Final score from online-go.com.", "Score final d'online-go.com.")
+                                            : L("Dead stones estimated by KataGo.", "Pierres mortes estimées par KataGo."),
                      w - 40);
     }
-    bool canResume = m_game.endReason() == EndReason::Score;
+    bool canResume = m_game.endReason() == EndReason::Score && m_mode != Mode::Online;
     for (auto& b : endButtons(canResume)) {
         bool f = false;
         auto all = endButtons(canResume);
@@ -1076,6 +1281,8 @@ static Rect pauseRect(int i)
 void App::updatePause(const Input& in)
 {
     bool canResign = m_mode != Mode::Sandbox && !m_game.finished();
+    if (m_mode == Mode::Online)
+        canResign = m_online.loaded && m_online.me != C_EMPTY && m_online.phase != "finished";
     if (in.repeated(HidNpadButton_AnyUp))
         m_pauseFocus = (m_pauseFocus + PI_COUNT - 1) % PI_COUNT;
     if (in.repeated(HidNpadButton_AnyDown))
@@ -1088,6 +1295,8 @@ void App::updatePause(const Input& in)
             chosen = i;
     if (in.pressed(HidNpadButton_B) || in.pressed(HidNpadButton_Plus))
         chosen = PI_RESUME;
+    if (chosen != PI_RESIGN && chosen >= 0)
+        m_online.confirmResign = false;
     switch (chosen) {
     case PI_RESUME: m_paused = false; break;
     case PI_SAVE:
@@ -1097,6 +1306,17 @@ void App::updatePause(const Input& in)
     case PI_RESIGN:
         if (!canResign)
             break;
+        if (m_mode == Mode::Online) {
+            // Irréversible : deuxième appui pour confirmer
+            if (!m_online.confirmResign) {
+                m_online.confirmResign = true;
+                break;
+            }
+            m_online.confirmResign = false;
+            m_ogs.gameResign(m_online.gameId);
+            m_paused = false;
+            break;
+        }
         m_engine.cancelMove();
         // Contre l'IA, c'est le joueur humain qui abandonne ; à deux, celui qui a le trait.
         if (m_mode == Mode::VsAI)
@@ -1107,9 +1327,15 @@ void App::updatePause(const Input& in)
         m_paused = false;
         break;
     case PI_MENU:
-        m_engine.stopAll();
         m_paused = false;
-        m_screen = Screen::Menu;
+        if (m_mode == Mode::Online) {
+            ogsLeaveGame();
+            break;
+        }
+        m_engine.stopAll();
+        m_screen = m_backToOgs ? Screen::Ogs : Screen::Menu;
+        if (m_backToOgs)
+            m_ogs.refreshGames();
         break;
     default: break;
     }
@@ -1123,6 +1349,12 @@ void App::drawPause()
     bool canResign = m_mode != Mode::Sandbox && !m_game.finished();
     const char* labels[PI_COUNT] = {L("Resume", "Reprendre"), L("Save the game (SGF)", "Sauvegarder la partie (SGF)"),
                                     L("Resign", "Abandonner"), L("Main menu", "Menu principal")};
+    if (m_mode == Mode::Online) {
+        canResign = m_online.loaded && m_online.me != C_EMPTY && m_online.phase != "finished";
+        if (m_online.confirmResign)
+            labels[PI_RESIGN] = L("Really resign? Press again", "Vraiment abandonner ? Rappuie");
+        labels[PI_MENU] = L("Leave (the game goes on)", "Quitter (la partie continue)");
+    }
     for (int i = 0; i < PI_COUNT; i++)
         drawButton(pauseRect(i), labels[i], nullptr, i == m_pauseFocus, i != PI_RESIGN || canResign);
 }
@@ -1280,33 +1512,4 @@ void App::drawSettings()
              L("Tip: extra networks (b6, b10, b15 .bin.gz or .txt.gz) can be put in /switch/nxgo/models.",
                "Astuce : d'autres réseaux (b6, b10, b15 en .bin.gz ou .txt.gz) se mettent dans /switch/nxgo/models."));
     drawHints({{"←→", L("Change", "Modifier")}, {"B", L("Back", "Retour")}});
-}
-
-// ------------------------------------------------------------------ OGS
-
-void App::updateOgs(const Input& in)
-{
-    if (in.pressed(HidNpadButton_B) || in.pressed(HidNpadButton_A) || Rect{120, 560, 500, 62}.tapped(in))
-        m_screen = Screen::Menu;
-}
-
-void App::drawOgs()
-{
-    drawTitle(L("Play online on OGS", "Jouer en ligne sur OGS"), "online-go.com");
-    const char* lines[] = {
-        L("Coming soon:", "Bientôt :"),
-        L("·  sign in with your online-go.com account by scanning a QR code,", "·  connexion avec ton compte online-go.com en scannant un QR code,"),
-        L("·  ranked and casual games against players worldwide,", "·  parties classées et amicales contre des joueurs du monde entier,"),
-        L("·  your finished games reviewed with KataGo.", "·  tes parties terminées revues avec KataGo."),
-        "",
-        L("During an online game, KataGo's analysis is disabled: OGS forbids", "Pendant une partie en ligne, l'analyse de KataGo est désactivée : OGS interdit"),
-        L("any AI help while a game is in progress.", "toute aide d'une IA tant que la partie n'est pas finie."),
-    };
-    int y = 160;
-    for (const char* l : lines) {
-        gfx_text(124, y, 24, l == lines[0] ? WOOD : TEXT, l);
-        y += 42;
-    }
-    drawButton({120, 560, 500, 62}, L("Back", "Retour"), "B", true);
-    drawHints({{"B", L("Back", "Retour")}});
 }

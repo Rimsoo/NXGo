@@ -2,7 +2,10 @@
 
 #include <sys/stat.h>
 
+#include <cmath>
 #include <map>
+
+#include <switch.h>
 
 #include "core/config_parser.h"
 #include "core/logger.h"
@@ -375,6 +378,75 @@ bool Engine::getAnalysis(AnalysisSnapshot& out, uint64_t& version)
 
 void Engine::stopAll()
 {
+    stopScan();
     stopAnalysis();
     cancelMove();
+}
+
+// ------------------------------------------------------------------ courbe de score
+
+void Engine::startScan(const Board& initial, Player first, const Rules& rules, const std::vector<Move>& moves)
+{
+    stopScan();
+    {
+        std::lock_guard<std::mutex> lock(m_analysisMutex);
+        m_scan.assign(moves.size() + 1, NAN);
+        m_scanVersion++;
+    }
+    NetId net = NetId::B6;
+    while (net != NetId::Count && !hasNet(net))
+        net = (NetId)((int)net + 1);
+    if (net == NetId::Count)
+        return;
+    NNEvaluator* eval = evalFor(net, initial.x_size, nullptr);
+    if (!eval)
+        return;
+    m_scanAbort = false;
+    m_scanning = true;
+    m_scanThread = std::thread([this, eval, initial, first, rules, moves] {
+        // Priorité plus basse que la recherche : l'analyse en cours reste fluide
+        svcSetThreadPriority(CUR_THREAD_HANDLE, 0x30);
+        Board board = initial;
+        BoardHistory hist(board, first, rules, 0, BoardHistoryModes());
+        Player pla = first;
+        MiscNNInputParams params;
+        for (size_t i = 0; i <= moves.size() && !m_scanAbort; i++) {
+            if (i > 0) {
+                const Move& mv = moves[i - 1];
+                if (mv.loc != Board::PASS_LOC && board.colors[mv.loc] != C_EMPTY) {
+                    pla = getOpp(mv.pla);
+                    continue;
+                }
+                hist.makeBoardMoveAssumeLegal(board, mv.loc, mv.pla, NULL, true);
+                pla = getOpp(mv.pla);
+            }
+            NNResultBuf buf;
+            eval->evaluate(board, hist, pla, params, buf, false, false);
+            float lead = buf.result ? -buf.result->whiteLead : NAN;
+            std::lock_guard<std::mutex> lock(m_analysisMutex);
+            if (i < m_scan.size()) {
+                m_scan[i] = lead;
+                m_scanVersion++;
+            }
+        }
+        m_scanning = false;
+    });
+}
+
+void Engine::stopScan()
+{
+    m_scanAbort = true;
+    if (m_scanThread.joinable())
+        m_scanThread.join();
+    m_scanning = false;
+}
+
+bool Engine::getScan(std::vector<float>& leadBlack, uint64_t& version)
+{
+    std::lock_guard<std::mutex> lock(m_analysisMutex);
+    if (m_scanVersion == version)
+        return false;
+    leadBlack = m_scan;
+    version = m_scanVersion;
+    return true;
 }

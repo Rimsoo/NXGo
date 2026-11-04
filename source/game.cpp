@@ -60,7 +60,48 @@ void Game::start(const GameSetup& setup)
     m_end = EndReason::None;
     m_winner = C_EMPTY;
     m_score = ScoreResult();
+    m_resultText.clear();
     rebuild();
+}
+
+void Game::startFrom(const GameSetup& setup, const Board& initial, Player first)
+{
+    m_setup = setup;
+    m_initialBoard = initial;
+    m_initialPla = first;
+    m_moves.clear();
+    m_cursor = 0;
+    m_end = EndReason::None;
+    m_winner = C_EMPTY;
+    m_score = ScoreResult();
+    m_resultText.clear();
+    rebuild();
+}
+
+void Game::appendForced(Loc loc, Player pla)
+{
+    bool follow = atEnd();
+    m_moves.push_back(Move(loc, pla));
+    if (!follow)
+        return;
+    m_cursor++;
+    if (loc != Board::PASS_LOC && !m_board.isOnBoard(loc))
+        loc = Board::PASS_LOC;
+    if (loc != Board::PASS_LOC && m_board.colors[loc] != C_EMPTY) {
+        rebuild();  // position différente de celle du serveur : on rejoue tout
+        return;
+    }
+    m_hist.makeBoardMoveAssumeLegal(m_board, loc, pla, NULL, true);
+    m_toPlay = getOpp(pla);
+    m_positionId++;
+}
+
+void Game::setExternalResult(EndReason reason, Player winner, const ScoreResult& score, const std::string& text)
+{
+    m_end = reason;
+    m_winner = winner;
+    m_score = score;
+    m_resultText = text;
 }
 
 void Game::rebuild()
@@ -70,6 +111,10 @@ void Game::rebuild()
     m_toPlay = m_initialPla;
     for (int i = 0; i < m_cursor; i++) {
         const Move& mv = m_moves[i];
+        if (mv.loc != Board::PASS_LOC && m_board.colors[mv.loc] != C_EMPTY) {
+            m_toPlay = getOpp(mv.pla);  // coup impossible ici (règles différentes) : ignoré
+            continue;
+        }
         // preventEncore : la partie s'arrête aux deux passes, le décompte est fait par nous
         m_hist.makeBoardMoveAssumeLegal(m_board, mv.loc, mv.pla, NULL, true);
         m_toPlay = getOpp(mv.pla);
@@ -104,6 +149,7 @@ bool Game::play(Loc loc)
     m_hist.makeBoardMoveAssumeLegal(m_board, loc, m_toPlay, NULL, true);
     m_toPlay = getOpp(m_toPlay);
     m_end = EndReason::None;
+    m_resultText.clear();
     m_score = ScoreResult();
     m_positionId++;
     return true;
@@ -141,6 +187,7 @@ void Game::resign(Player loser)
 
 void Game::resumePlay()
 {
+    m_resultText.clear();
     m_end = EndReason::None;
     m_score = ScoreResult();
 }
@@ -209,8 +256,95 @@ void Game::scoreWithOwnership(const std::vector<float>& ownership)
     m_winner = s.blackScore > s.whiteScore ? P_BLACK : (s.whiteScore > s.blackScore ? P_WHITE : C_EMPTY);
 }
 
+ScoreResult Game::scoreWithDead(const std::vector<bool>& dead) const
+{
+    int n = m_setup.size;
+    ScoreResult s;
+    s.owner.assign(n * n, 0);
+    s.dead.assign(n * n, false);
+    if ((int)dead.size() < n * n)
+        return s;
+    auto colorAt = [&](int i) { return m_board.colors[Location::getLoc(i % n, i / n, n)]; };
+
+    int blackStones = 0, whiteStones = 0, deadBlack = 0, deadWhite = 0;
+    for (int i = 0; i < n * n; i++) {
+        Color c = colorAt(i);
+        if (c != C_EMPTY && dead[i]) {
+            s.dead[i] = true;
+            c == C_BLACK ? deadBlack++ : deadWhite++;
+        } else if (c == C_BLACK) {
+            s.owner[i] = 1;
+            blackStones++;
+        } else if (c == C_WHITE) {
+            s.owner[i] = 2;
+            whiteStones++;
+        }
+    }
+
+    // Zones vides (pierres mortes comprises) : à une couleur si elles ne touchent qu'elle
+    std::vector<int> region(n * n, -1);
+    std::vector<int> stack, cells;
+    int regionId = 0;
+    for (int start = 0; start < n * n; start++) {
+        bool open = colorAt(start) == C_EMPTY || s.dead[start];
+        if (!open || region[start] >= 0)
+            continue;
+        bool touchB = false, touchW = false;
+        cells.clear();
+        stack.assign(1, start);
+        region[start] = regionId;
+        while (!stack.empty()) {
+            int i = stack.back();
+            stack.pop_back();
+            cells.push_back(i);
+            int x = i % n, y = i / n;
+            const int nb[4][2] = {{x - 1, y}, {x + 1, y}, {x, y - 1}, {x, y + 1}};
+            for (auto& p : nb) {
+                if (p[0] < 0 || p[0] >= n || p[1] < 0 || p[1] >= n)
+                    continue;
+                int j = p[1] * n + p[0];
+                Color c = colorAt(j);
+                if (c == C_EMPTY || s.dead[j]) {
+                    if (region[j] < 0) {
+                        region[j] = regionId;
+                        stack.push_back(j);
+                    }
+                } else if (c == C_BLACK) {
+                    touchB = true;
+                } else {
+                    touchW = true;
+                }
+            }
+        }
+        uint8_t owner = touchB && !touchW ? 1 : (touchW && !touchB ? 2 : 0);
+        for (int i : cells) {
+            bool dame = dead[i] && colorAt(i) == C_EMPTY;
+            s.owner[i] = dame ? 0 : owner;
+            if (owner == 1 && !dame)
+                s.blackTerritory++;
+            else if (owner == 2 && !dame)
+                s.whiteTerritory++;
+        }
+        regionId++;
+    }
+
+    s.blackPrisoners = m_board.numWhiteCaptures + deadWhite;
+    s.whitePrisoners = m_board.numBlackCaptures + deadBlack;
+    if (m_setup.rules == RulesKind::Chinese) {
+        s.blackScore = (float)(s.blackTerritory + blackStones);
+        s.whiteScore = (float)(s.whiteTerritory + whiteStones) + m_setup.komi;
+    } else {
+        s.blackScore = (float)(s.blackTerritory + s.blackPrisoners);
+        s.whiteScore = (float)(s.whiteTerritory + s.whitePrisoners) + m_setup.komi;
+    }
+    s.valid = true;
+    return s;
+}
+
 std::string Game::resultString() const
 {
+    if (!m_resultText.empty())
+        return m_resultText;
     if (m_end == EndReason::Resign)
         return m_winner == P_BLACK ? "B+R" : "W+R";
     if (m_end == EndReason::Score && m_score.valid) {
@@ -327,6 +461,9 @@ bool Game::loadSgf(const std::string& path, std::string& error)
         setup.blackName = sgf->rootNode.getSingleProperty("PB");
     if (sgf->rootNode.hasProperty("PW"))
         setup.whiteName = sgf->rootNode.getSingleProperty("PW");
+    std::string result;
+    if (sgf->rootNode.hasProperty("RE"))
+        result = sgf->rootNode.getSingleProperty("RE");
 
     Board board;
     BoardHistory hist;
@@ -344,6 +481,7 @@ bool Game::loadSgf(const std::string& path, std::string& error)
     m_initialPla = nextPla;
     m_moves.clear();
     m_end = EndReason::None;
+    m_resultText.clear();
     m_score = ScoreResult();
 
     // On garde les coups jusqu'au premier illégal (fichier abîmé ou règles différentes).
@@ -355,6 +493,7 @@ bool Game::loadSgf(const std::string& path, std::string& error)
         m_moves.push_back(mv);
     }
     m_cursor = (int)m_moves.size();
+    m_resultText = result;  // affiché en revue (ex. "W+R")
     rebuild();
     return true;
 }

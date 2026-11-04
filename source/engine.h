@@ -20,6 +20,7 @@
 
 #include "game/board.h"
 #include "game/boardhistory.h"
+#include "game/rules.h"
 
 class AsyncBot;
 class NNEvaluator;
@@ -86,6 +87,16 @@ public:
     // Copie le dernier état s'il est plus récent que `version` (mis à jour en retour).
     bool getAnalysis(AnalysisSnapshot& out, uint64_t& version);
 
+    // --- courbe de score d'une partie
+    // Une évaluation directe du réseau le plus rapide par position (sans recherche) :
+    // la courbe se remplit en quelques secondes, dans un thread à part.
+    // Position i = après i coups (0 = position de départ).
+    void startScan(const Board& initial, Player first, const Rules& rules, const std::vector<Move>& moves);
+    void stopScan();
+    bool scanning() const { return m_scanning; }
+    // Copie l'avance de Noir par position (NaN : pas encore calculée) si elle a changé.
+    bool getScan(std::vector<float>& leadBlack, uint64_t& version);
+
     // Arrête toute recherche en cours (avant de quitter l'appli par exemple).
     void stopAll();
 
@@ -119,6 +130,12 @@ private:
     double m_moveWinrate = 0.5;
     uint64_t m_movePositionId = 0;
     AsyncBot* m_moveBot = nullptr;
+
+    std::thread m_scanThread;
+    std::atomic<bool> m_scanning{false};
+    std::atomic<bool> m_scanAbort{false};
+    std::vector<float> m_scan;
+    uint64_t m_scanVersion = 1;
 
     std::atomic<bool> m_analyzing{false};
     std::mutex m_analysisMutex;

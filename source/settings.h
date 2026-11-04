@@ -20,6 +20,13 @@ struct Settings {
     int aiLevel = 5;
     int handicap = 0;
     int rules = 0;  // 0 japonaises, 1 chinoises
+
+    // En ligne (OGS)
+    int ogsSize = 2;   // 0 9x9, 1 13x13, 2 19x19
+    int ogsSpeed = 2;  // 0 blitz, 1 rapide, 2 live, 3 correspondance
+    // Identifiant de l'application OAuth (vide : celui compilé dans l'appli)
+    std::string ogsClientPassword;
+    std::string ogsUser;  // dernier identifiant saisi (jamais le mot de passe)
 };
 
 extern Settings g_settings;

@@ -10,10 +10,13 @@ Go on the Nintendo Switch (homebrew), with [KataGo](https://github.com/lightvect
 - 9x9, 13x13 and 19x19 boards, handicap, Japanese or Chinese rules
 - Analysis: win rate, score lead and best moves drawn on the board, optional territory estimate
 - End of game: dead stones and territory estimated by KataGo, then move-by-move review with analysis
+- Score graph in review: every move evaluated by the network in a few seconds, refined by the full analysis of the moves you look at; tap or drag it to jump to a move
 - SGF save and load (`/switch/nxgo/sgf`, `/sgf`)
 - Touch screen and controller everywhere
 - English and French
-- Planned: online play on [OGS](https://online-go.com) (KataGo help is disabled during online games, as OGS requires)
+- Online play on [OGS](https://online-go.com): your games in progress, automatic pairing (9x9 to 19x19, blitz to correspondence), clocks, dead-stone marking, and your game history: open any finished game for review with analysis and the score graph. Sign in with your username and password (exchanged for an OAuth token; the password is never stored)
+- No cheating online: while an OGS game is in progress KataGo is completely off (no analysis, hints or score estimate, as OGS requires). Review with analysis is offered once the game is over
+- Installable as a real title on the HOME menu (NSP), or as a classic `.nro`
 
 ## Performance
 
@@ -41,9 +44,24 @@ make -j8                     # nxgo.nro
 
 Copy `nxgo.nro` to `/switch/nxgo/` on the SD card. Extra networks (`b6`, `b10`, `b15` as `.bin.gz` or `.txt.gz`) can be put in `/switch/nxgo/models/`.
 
+### Installable title (NSP)
+
+`make nsp` packs the build into `nxgo.nsp` (title ID `05004E58476F0000`, full RAM, no user picker). It needs [hacBrewPack](https://github.com/rlaphoenix/hacBrewPack) and the `prod.keys` dumped from your own console (Lockpick_RCM):
+
+```sh
+HACBREWPACK=/path/to/hacbrewpack KEYS=~/.switch/prod.keys make nsp
+```
+
+Install it with Sphaira, DBI or Tinfoil. Installed homebrew titles need sigpatches (e.g. sys-patch).
+
+### OGS sign-in
+
+NXGo signs in through a public OAuth2 application registered on online-go.com (password grant, no secret). Forks can use their own: `ogs_client_id=` in `/switch/nxgo/config.txt`, or `make OGS_CLIENT_ID=...` at build time.
+
 ## Layout
 
-- `source/` the app (UI, game logic, KataGo bridge)
+- `source/` the app (UI, game logic, KataGo bridge, OGS client in `ogs.cpp`, TLS + WebSocket in `net/`)
+- `nsp/` NPDM description of the installable title
 - `katago_port/` builds KataGo for Horizon with no source patch: a `ghc::filesystem` shim over `std::filesystem` and stubs for three missing POSIX calls
 - `kgbench/` KataGo speed test on the console
 - `tools/` dev helpers: `devrun.py` launches a `.nro` through hbmenu in game mode with [sys-botbase](https://github.com/olliz0r/sys-botbase) + nxlink (`SWITCH_IP` env var), `botbase.py` sends buttons, taps and screenshots
