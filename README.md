@@ -1,5 +1,9 @@
 # NXGo
 
+> [!NOTE]
+> Main repository: [Forgejo](https://forgejo.aaaoz.fr/Rimso/NXGo) · Mirror: [GitHub](https://github.com/Rimsoo/NXGo) (kept in sync automatically).
+> Issues and feedback are welcome on GitHub.
+
 Go on the Nintendo Switch (homebrew), with [KataGo](https://github.com/lightvector/KataGo) running **natively on the console** as opponent and analysis engine. No PC needed.
 
 ![icon](icon.jpg)
