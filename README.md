@@ -39,7 +39,7 @@ KataGo runs on the Switch CPU (Eigen backend, 3 threads). Measured on a Switch L
 Requirements: [devkitPro](https://devkitpro.org) with devkitA64 and libnx.
 
 ```sh
-git clone --recursive https://github.com/Rimsoo/NXGo.git
+git clone --recursive https://forgejo.aaaoz.fr/Rimso/NXGo.git
 cd NXGo
 tools/get_models.sh          # KataGo networks into romfs/models
 make -C katago_port -j8      # KataGo + Eigen as libkatago.a
